@@ -8,7 +8,8 @@ This repository contains the project for the Huawei Cloud Embedded Software Cont
 
 ## 初赛 Preliminary Round
 
-![image-20250703110824897](.\README.assets\image-20250703110824897.png)
+![image-20250703110824897](./README.assets/image-20250703110824897.png)
+
 
 优化两版，详见
 
