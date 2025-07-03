@@ -1,0 +1,57 @@
+# --- 通用忽略 ---
+*.log
+*.tmp
+*.swp
+*.swo
+*.DS_Store
+*.bak
+*.old
+
+# --- C/C++ 编译输出 ---
+*.o
+*.obj
+*.so
+*.dll
+*.exe
+*.out
+*.a
+*.lib
+
+# --- CMake 生成文件 ---
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+build/
+build-*/
+compile_commands.json
+
+# --- CLion ---
+.idea/
+cmake-build-*/
+*.iml
+
+# --- VSCode ---
+.vscode/
+.vscode/settings.json
+.vscode/tasks.json
+.vscode/launch.json
+.vscode/c_cpp_properties.json
+
+# --- 系统文件 ---
+Thumbs.db
+desktop.ini
+
+# --- 单元测试缓存（如使用 gtest）---
+Testing/
+CTestTestfile.cmake
+test_detail.xml
+
+# --- 如果使用 Conan 包管理器 ---
+conanbuildinfo.*
+conaninfo.txt
+graph_info.json
+
+# --- 生成文档（如 doxygen） ---
+docs/html/
+docs/latex/
