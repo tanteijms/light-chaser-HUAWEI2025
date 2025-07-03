@@ -2,11 +2,13 @@
 本仓库为 华为云嵌入式软件大赛 2025 ·「追光者」 赛题项目仓库，涵盖初赛、复赛等阶段的完整开发过程与相关资料。
 This repository contains the project for the Huawei Cloud Embedded Software Contest 2025 · "Light Chaser", including the full development workflow and resources for both the preliminary and final rounds.
 
+官方网址[2025华为嵌入式软件大赛·追光者(算法组-京津东北赛区)_华为云开发者大赛平台_华为云](https://developer.huaweicloud.com/competition/information/1300000108/)
+
 本次赛事目前采用C++开发
 
 ## 初赛 Preliminary Round
 
-![image-20250703110824897](D:\GitHub\light-chaser-HUAWEI2025\README.assets\image-20250703110824897.png)
+![image-20250703110824897](.\README.assets\image-20250703110824897.png)
 
 优化两版，详见
 
