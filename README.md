@@ -13,9 +13,9 @@ This repository contains the project for the Huawei Cloud Embedded Software Cont
 
 优化两版，详见
 
-[code1.0v](.\preliminary\src\1.0)  
+[code1.0v](./preliminary/src/1.0/)  
 
-[code1.0.2v](.\preliminary\src\1.0.2_highest)  
+[code1.0.2v](./preliminary/src/1.0.2_highest/)  
 
 
 
