@@ -7,8 +7,38 @@
 #include <limits>
 #include <queue>
 #include <unordered_map>
+#include <random>
+#include <utility>
+
+// 调试函数
+// void print_matrix(const std::vector<std::vector<int>> &matrix)
+// {
+//     for (const auto &row : matrix)
+//     {
+//         for (const auto &val : row)
+//         {
+//             std::cout << val << " ";
+//         }
+//         std::cout << "\n";
+//     }
+// }
 
 // --- 数据结构 ---
+
+// 二维数组存储cost
+struct CostInfo
+{
+    long long cost = std::numeric_limits<long long>::max();
+    int optimal_B = -1;
+    long long finish_time = -1;
+
+    // 重载输出运算符，只输出cost
+    friend std::ostream &operator<<(std::ostream &os, const CostInfo &info)
+    {
+        os << info.cost;
+        return os;
+    }
+};
 
 struct Server
 {
@@ -62,6 +92,7 @@ const int MAX_BATCH_SIZE = 1000; // 最大批处理大小
 const long long DEADLINE_PENALTY_WEIGHT = 1000;
 const int MIGRATION_PENALTY = 20;
 const int LOAD_BALANCE_WEIGHT = 1;
+const double SOFTMAX_TEMPERATURE = 0.1; // softmax温度参数，控制概率分布的锐度
 
 // --- 辅助函数 ---
 
@@ -284,9 +315,10 @@ int main()
             }
         }
 
-        std::sort(user_indices.begin(), user_indices.end(), [](int a, int b) {
-            return users[a].urgency > users[b].urgency;  // 紧急度高的优先
-        });
+        std::sort(user_indices.begin(), user_indices.end(), [](int a, int b)
+                  {
+                      return users[a].urgency > users[b].urgency; // 紧急度高的优先
+                  });
 
         // --- 在current_time进行调度决策 ---
         long long best_cost = std::numeric_limits<long long>::max();
@@ -294,6 +326,9 @@ int main()
         int best_npu_idx = -1;
         int best_B = -1;
         long long best_finish_time = -1;
+
+        std::vector<std::vector<CostInfo>>
+            cost_matrix(M, std::vector<CostInfo>(npus.size()));
 
         // 遍历按紧急度排序的用户
         for (int i : user_indices)
@@ -323,26 +358,32 @@ int main()
 
                 int optimal_B = find_optimal_batch(servers[server_idx], max_b, users[i].remaining_cnt, min_b_required);
                 if (optimal_B <= 0)
-                    continue;
+                {
+                    cost_matrix[i][j].cost = std::numeric_limits<long long>::max();
+                    continue; // 无法满足请求
+                }
 
                 long long send_time = users[i].next_send_time;
                 long long arrival_time = send_time + latencies[server_idx][i];
                 long long start_time = std::max(arrival_time, npus[j].free_at);
                 long long inference_time = static_cast<long long>(calculate_inference_time(optimal_B, servers[server_idx].k));
                 long long finish_time = start_time + inference_time;
+                cost_matrix[i][j].finish_time = finish_time; // 记录完成时间
 
                 // 改进的成本函数 - 考虑更多因素
                 long long time_over_deadline = std::max(0LL, finish_time - users[i].e);
                 long long cost = finish_time;
 
                 // 1. 截止时间惩罚 (非线性)
-                if (time_over_deadline > 0) {
+                if (time_over_deadline > 0)
+                {
                     cost += time_over_deadline * time_over_deadline / 1000 + time_over_deadline * DEADLINE_PENALTY_WEIGHT;
                 }
 
                 // 2. 紧急度因子
                 long long remaining_time = std::max(1LL, users[i].e - current_time);
-                if (remaining_time < 10000) {  // 时间紧张时
+                if (remaining_time < 10000)
+                { // 时间紧张时
                     cost = static_cast<long long>(cost * (1.0 + users[i].urgency * 0.1));
                 }
 
@@ -363,7 +404,8 @@ int main()
 
                 // 5. 负载均衡 (考虑相对负载)
                 double avg_utilization = 0;
-                for (const auto& npu : npus) {
+                for (const auto &npu : npus)
+                {
                     avg_utilization += npu.utilization_time;
                 }
                 avg_utilization /= npus.size();
@@ -372,19 +414,97 @@ int main()
                 cost += static_cast<long long>(relative_load * LOAD_BALANCE_WEIGHT);
 
                 // 6. 服务器匹配度奖励
-                if (npus[j].server_id == users[i].last_server_id) {
-                    cost -= 50; // 继续使用同一服务器的奖励
+                if (npus[j].server_id == users[i].last_server_id)
+                {
+                    cost /= 50; // 继续使用同一服务器的奖励
                 }
 
-                if (cost < best_cost)
+                // 记录成本和最优B
+                cost_matrix[i][j].cost = cost;
+                cost_matrix[i][j].optimal_B = optimal_B;
+
+                // if (cost < best_cost)
+                // {
+                //     best_cost = cost;
+                //     best_user_idx = i;
+                //     best_npu_idx = j;
+                //     best_B = optimal_B;
+                //     best_finish_time = finish_time;
+                // }
+            }
+        }
+
+        // printf("Current time: %lld\n", current_time);
+        // // 打印cost_matrix的cost值用于调试
+        // for (const auto &row : cost_matrix)
+        // {
+        //     for (const auto &info : row)
+        //     {
+        //         if (info.cost == std::numeric_limits<long long>::max())
+        //             std::cout << "INF ";
+        //         else
+        //             std::cout << info.cost << " ";
+        //     }
+        //     std::cout << "\n";
+        // }
+
+        // 按概率分布采样选取best_user_idx和best_npu_idx
+        best_cost = std::numeric_limits<long long>::max();
+
+        // 收集所有有效的(user_idx, npu_idx)对及其cost
+        std::vector<std::tuple<int, int, long long>> valid_options; // (user_idx, npu_idx, cost)
+
+        for (int i : user_indices)
+        {
+            for (size_t j = 0; j < npus.size(); ++j)
+            {
+                if (cost_matrix[i][j].cost < std::numeric_limits<long long>::max())
                 {
-                    best_cost = cost;
-                    best_user_idx = i;
-                    best_npu_idx = j;
-                    best_B = optimal_B;
-                    best_finish_time = finish_time;
+                    valid_options.push_back(std::make_tuple(i, j, cost_matrix[i][j].cost));
                 }
             }
+        }
+
+        if (!valid_options.empty())
+        {
+            // 方法：基于排名的温度softmax，适合处理正负mixed的cost
+
+            // 1. 按cost从小到大排序（cost越小越好）
+            std::vector<size_t> indices(valid_options.size());
+            std::iota(indices.begin(), indices.end(), 0);
+
+            std::sort(indices.begin(), indices.end(), [&](size_t a, size_t b)
+                      { return std::get<2>(valid_options[a]) < std::get<2>(valid_options[b]); });
+
+            // 2. 基于排名计算权重：rank越小（越好），权重越大
+            std::vector<double> probabilities(valid_options.size());
+            double sum_exp = 0.0;
+
+            for (size_t k = 0; k < indices.size(); ++k)
+            {
+                size_t original_idx = indices[k];
+                double rank_score = static_cast<double>(indices.size() - k); // 最好的排名得分最高
+                probabilities[original_idx] = std::exp(rank_score / SOFTMAX_TEMPERATURE);
+                sum_exp += probabilities[original_idx];
+            }
+
+            // 归一化为概率分布
+            for (double &prob : probabilities)
+            {
+                prob /= sum_exp;
+            }
+
+            // 按概率分布随机采样
+            static std::random_device rd;
+            static std::mt19937 gen(rd());
+            std::discrete_distribution<> dist(probabilities.begin(), probabilities.end());
+
+            int selected_idx = dist(gen);
+            best_user_idx = std::get<0>(valid_options[selected_idx]);
+            best_npu_idx = std::get<1>(valid_options[selected_idx]);
+            best_B = cost_matrix[best_user_idx][best_npu_idx].optimal_B;
+            best_finish_time = cost_matrix[best_user_idx][best_npu_idx].finish_time;
+            best_cost = cost_matrix[best_user_idx][best_npu_idx].cost;
         }
 
         // --- 执行最优调度 ---
