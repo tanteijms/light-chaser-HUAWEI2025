@@ -31,6 +31,7 @@ struct User
     int last_server_id;        // 上一个请求发送的服务器id
     int last_npu_id_in_server; // 上一个请求发送的NPU id
     int a, b;                  // 用户特定的显存参数: Memory = a_i * batchsize + b_i
+    double urgency;            // 紧急度 = remaining_cnt / (deadline - current_time)
 };
 
 struct Npu
@@ -133,6 +134,41 @@ int find_optimal_batch(const Server &server, int max_batch_for_user, int remaini
     return best_b;
 }
 
+// 智能Batch选择 - 考虑时间窗口和效率平衡
+int find_optimal_batch_smart(const Server &server, int max_batch_for_user, int remaining_samples,
+                             int min_b_required, long long remaining_time, double urgency)
+{
+    int search_limit = std::min(remaining_samples, max_batch_for_user);
+    if (search_limit < min_b_required)
+    {
+        return 0;
+    }
+
+    // 如果时间非常紧张，优先选择较大的batch
+    if (remaining_time < 5000 || urgency > 1.0)
+    {
+        // 紧急情况下，选择接近最大允许的batch
+        int urgent_batch = std::min(search_limit, static_cast<int>(remaining_samples * 0.8));
+        if (urgent_batch >= min_b_required)
+        {
+            return urgent_batch;
+        }
+    }
+
+    // 正常情况下，寻找效率最优的batch
+    double best_efficiency = -1.0;
+    int best_b = 0;
+    for (int b = min_b_required; b <= search_limit; ++b)
+    {
+        if (server.efficiency[b] > best_efficiency)
+        {
+            best_efficiency = server.efficiency[b];
+            best_b = b;
+        }
+    }
+    return best_b;
+}
+
 void read_input()
 {
     std::ios_base::sync_with_stdio(false);
@@ -191,6 +227,21 @@ void read_input()
     }
 }
 
+// 更新用户紧急度
+void update_user_urgency(long long current_time)
+{
+    for (int i = 0; i < M; ++i)
+    {
+        if (users[i].remaining_cnt <= 0)
+        {
+            users[i].urgency = 0;
+            continue;
+        }
+        long long remaining_time = std::max(1LL, users[i].e - current_time);
+        users[i].urgency = static_cast<double>(users[i].remaining_cnt) / remaining_time;
+    }
+}
+
 // --- 主调度逻辑 ---
 
 int main()
@@ -204,8 +255,7 @@ int main()
         total_remaining_cnt += user.cnt;
     }
 
-    long long current_time = 0;
-
+    // 修复变量遮蔽问题 - 移除重复声明
     while (total_remaining_cnt > 0)
     {
         long long current_time = std::numeric_limits<long long>::max();
@@ -221,6 +271,23 @@ int main()
             break; // 所有用户处理完毕
         }
 
+        // 更新用户紧急度
+        update_user_urgency(current_time);
+
+        // 按紧急度对用户排序，优先处理紧急的用户
+        std::vector<int> user_indices;
+        for (int i = 0; i < M; ++i)
+        {
+            if (users[i].remaining_cnt > 0 && users[i].next_send_time <= current_time)
+            {
+                user_indices.push_back(i);
+            }
+        }
+
+        std::sort(user_indices.begin(), user_indices.end(), [](int a, int b) {
+            return users[a].urgency > users[b].urgency;  // 紧急度高的优先
+        });
+
         // --- 在current_time进行调度决策 ---
         long long best_cost = std::numeric_limits<long long>::max();
         int best_user_idx = -1;
@@ -228,13 +295,9 @@ int main()
         int best_B = -1;
         long long best_finish_time = -1;
 
-        // 遍历所有可以在 current_time 或之前发送请求的用户
-        for (int i = 0; i < M; ++i)
+        // 遍历按紧急度排序的用户
+        for (int i : user_indices)
         {
-            if (users[i].remaining_cnt == 0 || users[i].next_send_time > current_time)
-            {
-                continue;
-            }
 
             // 计算满足T_i <= 300约束的最小B
             int requests_so_far = solution[i].size();
@@ -268,20 +331,50 @@ int main()
                 long long inference_time = static_cast<long long>(calculate_inference_time(optimal_B, servers[server_idx].k));
                 long long finish_time = start_time + inference_time;
 
-                // 优化后的成本函数
+                // 改进的成本函数 - 考虑更多因素
                 long long time_over_deadline = std::max(0LL, finish_time - users[i].e);
-                long long cost = finish_time + time_over_deadline * DEADLINE_PENALTY_WEIGHT;
+                long long cost = finish_time;
 
-                // 迁移惩罚
+                // 1. 截止时间惩罚 (非线性)
+                if (time_over_deadline > 0) {
+                    cost += time_over_deadline * time_over_deadline / 1000 + time_over_deadline * DEADLINE_PENALTY_WEIGHT;
+                }
+
+                // 2. 紧急度因子
+                long long remaining_time = std::max(1LL, users[i].e - current_time);
+                if (remaining_time < 10000) {  // 时间紧张时
+                    cost = static_cast<long long>(cost * (1.0 + users[i].urgency * 0.1));
+                }
+
+                // 3. 效率奖励 - 选择高效batch的奖励
+                double efficiency_bonus = servers[server_idx].efficiency[optimal_B] * 10;
+                cost -= static_cast<long long>(efficiency_bonus);
+
+                // 4. 迁移惩罚 (渐进式)
                 if (users[i].last_server_id != -1 &&
                     (npus[j].server_id != users[i].last_server_id ||
                      npus[j].id_in_server != users[i].last_npu_id_in_server))
                 {
-                    cost += MIGRATION_PENALTY;
+                    // 根据已发送请求数量调整迁移惩罚
+                    int sent_requests = solution[i].size();
+                    int migration_penalty = MIGRATION_PENALTY * (1 + sent_requests / 10);
+                    cost += migration_penalty;
                 }
 
-                // 负载均衡惩罚 (基于NPU累计工作时间)
-                cost += npus[j].utilization_time * LOAD_BALANCE_WEIGHT;
+                // 5. 负载均衡 (考虑相对负载)
+                double avg_utilization = 0;
+                for (const auto& npu : npus) {
+                    avg_utilization += npu.utilization_time;
+                }
+                avg_utilization /= npus.size();
+
+                double relative_load = npus[j].utilization_time - avg_utilization;
+                cost += static_cast<long long>(relative_load * LOAD_BALANCE_WEIGHT);
+
+                // 6. 服务器匹配度奖励
+                if (npus[j].server_id == users[i].last_server_id) {
+                    cost -= 50; // 继续使用同一服务器的奖励
+                }
 
                 if (cost < best_cost)
                 {
@@ -378,6 +471,8 @@ int main()
         }
         std::cout << "\n";
     }
+
+    std::cout.flush(); // 强制清空输出缓存
 
     return 0;
 }
