@@ -90,9 +90,9 @@ std::vector<Npu> npus;
 const int MAX_BATCH_SIZE = 1000; // 最大批处理大小
 // 成本函数中的权重系数，用于调优
 const long long DEADLINE_PENALTY_WEIGHT = 1000;
-const int MIGRATION_PENALTY = 20;
+const int MIGRATION_PENALTY = 70;
 const int LOAD_BALANCE_WEIGHT = 1;
-const double SOFTMAX_TEMPERATURE = 0.1; // softmax温度参数，控制概率分布的锐度
+const double SOFTMAX_TEMPERATURE = 0.3; // softmax温度参数，控制概率分布的锐度
 
 // --- 辅助函数 ---
 
@@ -467,25 +467,59 @@ int main()
 
         if (!valid_options.empty())
         {
-            // 方法：基于排名的温度softmax，适合处理正负mixed的cost
+            // 方法：稀疏矩阵自适应概率分布，专门处理大量INF + 少数负值的情况
 
-            // 1. 按cost从小到大排序（cost越小越好）
-            std::vector<size_t> indices(valid_options.size());
-            std::iota(indices.begin(), indices.end(), 0);
-
-            std::sort(indices.begin(), indices.end(), [&](size_t a, size_t b)
-                      { return std::get<2>(valid_options[a]) < std::get<2>(valid_options[b]); });
-
-            // 2. 基于排名计算权重：rank越小（越好），权重越大
             std::vector<double> probabilities(valid_options.size());
             double sum_exp = 0.0;
 
-            for (size_t k = 0; k < indices.size(); ++k)
+            if (valid_options.size() == 1)
             {
-                size_t original_idx = indices[k];
-                double rank_score = static_cast<double>(indices.size() - k); // 最好的排名得分最高
-                probabilities[original_idx] = std::exp(rank_score / SOFTMAX_TEMPERATURE);
-                sum_exp += probabilities[original_idx];
+                // 只有一个有效选项，直接选择
+                probabilities[0] = 1.0;
+                sum_exp = 1.0;
+            }
+            else if (valid_options.size() <= 50)
+            {
+                // 有效选项很少时，使用改进的排名法，给更多探索机会
+                std::vector<size_t> indices(valid_options.size());
+                std::iota(indices.begin(), indices.end(), 0);
+
+                std::sort(indices.begin(), indices.end(), [&](size_t a, size_t b)
+                          { return std::get<2>(valid_options[a]) < std::get<2>(valid_options[b]); });
+
+                for (size_t k = 0; k < indices.size(); ++k)
+                {
+                    size_t original_idx = indices[k];
+                    // 对于少数有效选项，使用更平缓的权重分布
+                    double rank_score = static_cast<double>(indices.size() - k) + 0.5;                // +0.5避免0权重
+                    probabilities[original_idx] = std::exp(rank_score / (SOFTMAX_TEMPERATURE * 2.0)); // 温度放大
+                    sum_exp += probabilities[original_idx];
+                }
+            }
+            else
+            {
+                // 有效选项较多时，使用成本归一化 + 温度softmax
+                std::vector<long long> costs;
+                for (const auto &option : valid_options)
+                {
+                    costs.push_back(std::get<2>(option));
+                }
+
+                // 找到最小和最大成本
+                long long min_cost = *std::min_element(costs.begin(), costs.end());
+                long long max_cost = *std::max_element(costs.begin(), costs.end());
+                long long cost_range = std::max(1LL, max_cost - min_cost);
+
+                for (size_t k = 0; k < valid_options.size(); ++k)
+                {
+                    long long cost = std::get<2>(valid_options[k]);
+                    // 将cost映射到[0, 1]区间，然后转换为效用（越小的cost，效用越大）
+                    double normalized_cost = static_cast<double>(cost - min_cost) / cost_range;
+                    double utility = 1.0 - normalized_cost; // cost小的utility大
+
+                    probabilities[k] = std::exp(utility / SOFTMAX_TEMPERATURE);
+                    sum_exp += probabilities[k];
+                }
             }
 
             // 归一化为概率分布
