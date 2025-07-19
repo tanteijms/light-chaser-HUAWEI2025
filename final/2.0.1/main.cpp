@@ -89,11 +89,13 @@ std::vector<std::vector<int>> latencies; // latencies[server_idx][user_idx]
 std::vector<Npu> npus;
 const int MAX_BATCH_SIZE = 1000; // 最大批处理大小
 // 成本函数中的权重系数，用于调优
-const long long DEADLINE_PENALTY_WEIGHT = 1000;
-const int MIGRATION_PENALTY = 70;
-const int LOAD_BALANCE_WEIGHT = 1;
+const long long DEADLINE_PENALTY_WEIGHT = 10000;
+const int MIGRATION_PENALTY = 30;
+const int LOAD_BALANCE_WEIGHT = 5;
 const double SOFTMAX_TEMPERATURE = 0.0000001; // softmax温度参数，控制概率分布的锐度
-const int TOP_K = 5;                          // top-k策略中的k值，从最优的k个选项中随机选择
+const int TOP_K = 1;                          // top-k策略中的k值，从最优的k个选项中随机选择
+const double EFFICIENCY_REWARD_WEIGHT = 50.0; // 效率奖励权重
+const double URGENCY_THRESHOLD = 0.8;         // 紧急度阈值
 
 // --- 辅助函数 ---
 
@@ -177,24 +179,30 @@ int find_optimal_batch_smart(const Server &server, int max_batch_for_user, int r
     }
 
     // 如果时间非常紧张，优先选择较大的batch
-    if (remaining_time < 5000 || urgency > 1.0)
+    if (remaining_time < 3000 || urgency > URGENCY_THRESHOLD)
     {
-        // 紧急情况下，选择接近最大允许的batch
-        int urgent_batch = std::min(search_limit, static_cast<int>(remaining_samples * 0.8));
+        // 紧急情况下，选择尽可能大的batch来加快处理速度
+        int urgent_batch = std::min(search_limit, static_cast<int>(remaining_samples * 0.9));
         if (urgent_batch >= min_b_required)
         {
             return urgent_batch;
         }
     }
 
-    // 正常情况下，寻找效率最优的batch
-    double best_efficiency = -1.0;
-    int best_b = 0;
+    // 正常情况下，寻找效率最优的batch，但偏向较大的batch
+    double best_score = -1.0;
+    int best_b = min_b_required;
+
     for (int b = min_b_required; b <= search_limit; ++b)
     {
-        if (server.efficiency[b] > best_efficiency)
+        double efficiency = server.efficiency[b];
+        // 给大batch额外的奖励，鼓励批处理
+        double size_bonus = std::sqrt(static_cast<double>(b)) * 0.1;
+        double score = efficiency + size_bonus;
+
+        if (score > best_score)
         {
-            best_efficiency = server.efficiency[b];
+            best_score = score;
             best_b = b;
         }
     }
@@ -357,7 +365,8 @@ int main()
                 if (max_b <= 0)
                     continue;
 
-                int optimal_B = find_optimal_batch(servers[server_idx], max_b, users[i].remaining_cnt, min_b_required);
+                int optimal_B = find_optimal_batch_smart(servers[server_idx], max_b, users[i].remaining_cnt,
+                                                         min_b_required, users[i].e - current_time, users[i].urgency);
                 if (optimal_B <= 0)
                 {
                     cost_matrix[i][j].cost = std::numeric_limits<long long>::max();
@@ -371,39 +380,55 @@ int main()
                 long long finish_time = start_time + inference_time;
                 cost_matrix[i][j].finish_time = finish_time; // 记录完成时间
 
-                // 改进的成本函数 - 考虑更多因素
+                // 改进的成本函数 - 更精确的多因素评估
                 long long time_over_deadline = std::max(0LL, finish_time - users[i].e);
                 long long cost = finish_time;
 
-                // 1. 截止时间惩罚 (非线性)
+                // 1. 截止时间惩罚 (指数增长)
                 if (time_over_deadline > 0)
                 {
-                    cost += time_over_deadline * time_over_deadline / 1000 + time_over_deadline * DEADLINE_PENALTY_WEIGHT;
+                    // 超时惩罚：指数增长，超时越多惩罚越重
+                    double overtime_ratio = static_cast<double>(time_over_deadline) / (users[i].e - users[i].s);
+                    cost += static_cast<long long>(DEADLINE_PENALTY_WEIGHT * std::exp(overtime_ratio * 2));
                 }
 
-                // 2. 紧急度因子
+                // 2. 紧急度动态调整
                 long long remaining_time = std::max(1LL, users[i].e - current_time);
-                if (remaining_time < 10000)
-                { // 时间紧张时
-                    cost = static_cast<long long>(cost * (1.0 + users[i].urgency * 0.1));
-                }
-
-                // 3. 效率奖励 - 选择高效batch的奖励
-                double efficiency_bonus = servers[server_idx].efficiency[optimal_B] * 10;
-                cost -= static_cast<long long>(efficiency_bonus);
-
-                // 4. 迁移惩罚 (渐进式)
-                if (users[i].last_server_id != -1 &&
-                    (npus[j].server_id != users[i].last_server_id ||
-                     npus[j].id_in_server != users[i].last_npu_id_in_server))
+                double time_pressure = static_cast<double>(users[i].remaining_cnt) / remaining_time;
+                if (time_pressure > URGENCY_THRESHOLD)
                 {
-                    // 根据已发送请求数量调整迁移惩罚
-                    int sent_requests = solution[i].size();
-                    int migration_penalty = MIGRATION_PENALTY * (1 + sent_requests / 10);
-                    cost += migration_penalty;
+                    // 时间压力大时，更重视快速完成
+                    cost = static_cast<long long>(cost * (1.0 + time_pressure * 0.2));
                 }
 
-                // 5. 负载均衡 (考虑相对负载)
+                // 3. 效率奖励 (避免负cost)
+                double efficiency_bonus = servers[server_idx].efficiency[optimal_B] * EFFICIENCY_REWARD_WEIGHT;
+                // 使用乘法而非减法避免负值
+                cost = static_cast<long long>(cost / (1.0 + efficiency_bonus / 10000.0));
+
+                // 4. 迁移惩罚 (更智能的渐进式)
+                if (users[i].last_server_id != -1)
+                {
+                    bool server_changed = (npus[j].server_id != users[i].last_server_id);
+                    bool npu_changed = (npus[j].id_in_server != users[i].last_npu_id_in_server);
+
+                    if (server_changed || npu_changed)
+                    {
+                        int sent_requests = solution[i].size();
+                        // 服务器切换比NPU切换惩罚更重
+                        int migration_penalty = server_changed ? MIGRATION_PENALTY * 2 : MIGRATION_PENALTY;
+                        // 随着请求数量增加，迁移惩罚逐渐增加
+                        migration_penalty *= (1 + sent_requests / 5);
+                        cost += migration_penalty;
+                    }
+                    else
+                    {
+                        // 继续使用同一NPU的奖励
+                        cost = static_cast<long long>(cost * 0.95);
+                    }
+                }
+
+                // 5. 负载均衡优化
                 double avg_utilization = 0;
                 for (const auto &npu : npus)
                 {
@@ -412,13 +437,23 @@ int main()
                 avg_utilization /= npus.size();
 
                 double relative_load = npus[j].utilization_time - avg_utilization;
-                cost += static_cast<long long>(relative_load * LOAD_BALANCE_WEIGHT);
-
-                // 6. 服务器匹配度奖励
-                if (npus[j].server_id == users[i].last_server_id)
+                // 只对高负载NPU进行惩罚，鼓励使用低负载NPU
+                if (relative_load > 0)
                 {
-                    cost /= 50; // 继续使用同一服务器的奖励
+                    cost += static_cast<long long>(relative_load * LOAD_BALANCE_WEIGHT);
                 }
+                else
+                {
+                    // 使用低负载NPU的奖励
+                    cost = static_cast<long long>(cost * (1.0 + relative_load / 10000.0));
+                }
+
+                // 6. 批处理大小奖励 - 鼓励大批处理
+                double batch_bonus = std::sqrt(optimal_B) * 2;
+                cost = static_cast<long long>(cost / (1.0 + batch_bonus / 1000.0));
+
+                // 确保cost为正数
+                cost = std::max(1LL, cost);
 
                 // 记录成本和最优B
                 cost_matrix[i][j].cost = cost;
@@ -468,7 +503,7 @@ int main()
 
         if (!valid_options.empty())
         {
-            // 方法：Top-K策略，从cost最小的k个选项中随机选择
+            // 方法：智能Top-K策略，根据情况动态调整k值
 
             // 1. 按cost从小到大排序（cost越小越好）
             std::vector<size_t> indices(valid_options.size());
@@ -477,16 +512,68 @@ int main()
             std::sort(indices.begin(), indices.end(), [&](size_t a, size_t b)
                       { return std::get<2>(valid_options[a]) < std::get<2>(valid_options[b]); });
 
-            // 2. 确定实际的k值（不超过可用选项数量）
-            int actual_k = std::min(TOP_K, static_cast<int>(valid_options.size()));
+            // 2. 动态确定k值
+            int base_k = TOP_K;
 
-            // 3. 从前k个最优选项中随机选择一个
+            // 计算整体紧急度
+            double total_urgency = 0;
+            int urgent_count = 0;
+            for (int idx : user_indices)
+            {
+                total_urgency += users[idx].urgency;
+                if (users[idx].urgency > URGENCY_THRESHOLD)
+                    urgent_count++;
+            }
+            double avg_urgency = user_indices.empty() ? 0 : total_urgency / user_indices.size();
+
+            // 根据紧急程度调整k值
+            if (avg_urgency > URGENCY_THRESHOLD || urgent_count > user_indices.size() / 2)
+            {
+                // 紧急情况下，减少随机性，更偏向最优解
+                base_k = 1;
+            }
+            else if (valid_options.size() <= 3)
+            {
+                // 可选项很少时，全部考虑
+                base_k = static_cast<int>(valid_options.size());
+            }
+            else if (current_time > 30000)
+            {
+                // 后期阶段，增加随机性避免局部最优
+                base_k = std::min(5, static_cast<int>(valid_options.size()));
+            }
+
+            int actual_k = std::min(base_k, static_cast<int>(valid_options.size()));
+
+            // 3. 智能选择策略
             static std::random_device rd;
             static std::mt19937 gen(rd());
-            std::uniform_int_distribution<> dist(0, actual_k - 1);
 
-            int selected_rank = dist(gen);             // 在前k个中随机选择
-            int selected_idx = indices[selected_rank]; // 获取原始索引
+            int selected_idx;
+            if (actual_k == 1 || avg_urgency > 1.2)
+            {
+                // 极度紧急或只有一个选择，直接选最优
+                selected_idx = indices[0];
+            }
+            else
+            {
+                // 在前k个中按权重选择，越优权重越大
+                std::vector<double> weights(actual_k);
+                double sum_weights = 0;
+                for (int i = 0; i < actual_k; ++i)
+                {
+                    weights[i] = static_cast<double>(actual_k - i); // 排名越前权重越大
+                    sum_weights += weights[i];
+                }
+
+                // 归一化权重
+                for (double &w : weights)
+                    w /= sum_weights;
+
+                std::discrete_distribution<> dist(weights.begin(), weights.end());
+                int selected_rank = dist(gen);
+                selected_idx = indices[selected_rank];
+            }
 
             best_user_idx = std::get<0>(valid_options[selected_idx]);
             best_npu_idx = std::get<1>(valid_options[selected_idx]);
