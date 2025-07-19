@@ -93,6 +93,7 @@ const long long DEADLINE_PENALTY_WEIGHT = 1000;
 const int MIGRATION_PENALTY = 70;
 const int LOAD_BALANCE_WEIGHT = 1;
 const double SOFTMAX_TEMPERATURE = 0.0000001; // softmax温度参数，控制概率分布的锐度
+const int TOP_K = 5;                          // top-k策略中的k值，从最优的k个选项中随机选择
 
 // --- 辅助函数 ---
 
@@ -467,73 +468,26 @@ int main()
 
         if (!valid_options.empty())
         {
-            // 方法：稀疏矩阵自适应概率分布，专门处理大量INF + 少数负值的情况
+            // 方法：Top-K策略，从cost最小的k个选项中随机选择
 
-            std::vector<double> probabilities(valid_options.size());
-            double sum_exp = 0.0;
+            // 1. 按cost从小到大排序（cost越小越好）
+            std::vector<size_t> indices(valid_options.size());
+            std::iota(indices.begin(), indices.end(), 0);
 
-            if (valid_options.size() == 1)
-            {
-                // 只有一个有效选项，直接选择
-                probabilities[0] = 1.0;
-                sum_exp = 1.0;
-            }
-            else if (valid_options.size() <= 50)
-            {
-                // 有效选项很少时，使用改进的排名法，给更多探索机会
-                std::vector<size_t> indices(valid_options.size());
-                std::iota(indices.begin(), indices.end(), 0);
+            std::sort(indices.begin(), indices.end(), [&](size_t a, size_t b)
+                      { return std::get<2>(valid_options[a]) < std::get<2>(valid_options[b]); });
 
-                std::sort(indices.begin(), indices.end(), [&](size_t a, size_t b)
-                          { return std::get<2>(valid_options[a]) < std::get<2>(valid_options[b]); });
+            // 2. 确定实际的k值（不超过可用选项数量）
+            int actual_k = std::min(TOP_K, static_cast<int>(valid_options.size()));
 
-                for (size_t k = 0; k < indices.size(); ++k)
-                {
-                    size_t original_idx = indices[k];
-                    // 对于少数有效选项，使用更平缓的权重分布
-                    double rank_score = static_cast<double>(indices.size() - k) + 0.5;                // +0.5避免0权重
-                    probabilities[original_idx] = std::exp(rank_score / (SOFTMAX_TEMPERATURE * 2.0)); // 温度放大
-                    sum_exp += probabilities[original_idx];
-                }
-            }
-            else
-            {
-                // 有效选项较多时，使用成本归一化 + 温度softmax
-                std::vector<long long> costs;
-                for (const auto &option : valid_options)
-                {
-                    costs.push_back(std::get<2>(option));
-                }
-
-                // 找到最小和最大成本
-                long long min_cost = *std::min_element(costs.begin(), costs.end());
-                long long max_cost = *std::max_element(costs.begin(), costs.end());
-                long long cost_range = std::max(1LL, max_cost - min_cost);
-
-                for (size_t k = 0; k < valid_options.size(); ++k)
-                {
-                    long long cost = std::get<2>(valid_options[k]);
-                    // 将cost映射到[0, 1]区间，然后转换为效用（越小的cost，效用越大）
-                    double normalized_cost = static_cast<double>(cost - min_cost) / cost_range;
-                    double utility = 1.0 - normalized_cost; // cost小的utility大
-
-                    probabilities[k] = std::exp(utility / SOFTMAX_TEMPERATURE);
-                    sum_exp += probabilities[k];
-                }
-            }
-
-            // 归一化为概率分布
-            for (double &prob : probabilities)
-            {
-                prob /= sum_exp;
-            }
-
-            // 按概率分布随机采样
+            // 3. 从前k个最优选项中随机选择一个
             static std::random_device rd;
             static std::mt19937 gen(rd());
-            std::discrete_distribution<> dist(probabilities.begin(), probabilities.end());
+            std::uniform_int_distribution<> dist(0, actual_k - 1);
 
-            int selected_idx = dist(gen);
+            int selected_rank = dist(gen);             // 在前k个中随机选择
+            int selected_idx = indices[selected_rank]; // 获取原始索引
+
             best_user_idx = std::get<0>(valid_options[selected_idx]);
             best_npu_idx = std::get<1>(valid_options[selected_idx]);
             best_B = cost_matrix[best_user_idx][best_npu_idx].optimal_B;
