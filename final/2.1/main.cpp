@@ -66,7 +66,7 @@ double calculate_efficiency(int B, int k)
 {
     if (B <= 0)
         return 0;
-    double inference_time = std::ceil(std::sqrt(B) / k);
+    double inference_time = std::ceil((double)B / (k * std::sqrt(B)));
     return B / inference_time;
 }
 
@@ -77,27 +77,12 @@ int calculate_optimal_batch(const Server &server, int max_samples,int user_id)
     if (max_b <= 1)
         return max_b;
 
-    // 为了避免重复计算，我们使用缓存
-    if (server.batch_efficiency.count(max_b) > 0)
-    {
-        return max_b;
+    // 使用 find 方法来访问 const unordered_map
+    auto it = server.batch_efficiency.find(max_b);
+    if (it != server.batch_efficiency.end()) {
+        return static_cast<int>(it->second);
     }
-
-    // 尝试不同的批处理大小，找到效率最高的
-    double best_efficiency = 0;
-    int best_b = 1;
-
-    for (int b = 1; b <= max_b; b++)
-    {
-        double efficiency = calculate_efficiency(b, server.k);
-        if (efficiency > best_efficiency)
-        {
-            best_efficiency = efficiency;
-            best_b = b;
-        }
-    }
-
-    return best_b;
+    return max_b; // 如果没有找到，返回原值
 }
 
 void read_input() // 读取、解析输入
@@ -160,6 +145,27 @@ void read_input() // 读取、解析输入
             npus.push_back({servers[i].id, j + 1, 0, 0});
         }
     }
+
+    // 预计算每个服务器的最佳批处理大小
+    for (int i = 0; i < N; ++i)
+    {
+        for (int max_samples = 1; max_samples <= 1000; max_samples++)
+        {
+            double best_efficiency = 0;
+            int best_b = 1;
+
+            for (int b = 1; b <= max_samples && b <= 1000; b++)
+            {
+                double efficiency = calculate_efficiency(b, servers[i].k);
+                if (efficiency > best_efficiency)
+                {
+                    best_efficiency = efficiency;
+                    best_b = b;
+                }
+            }
+            servers[i].batch_efficiency[max_samples] = best_b;  // 缓存最佳批处理大小
+        }
+    }
 }
 
 // 更新用户的紧急度
@@ -188,8 +194,12 @@ int main() // 主函数
     }
 
     // 动态调度
-    while (total_remaining_cnt > 0)
+    int iteration_count = 0;
+    const int MAX_ITERATIONS = 100000; // 防止无限循环
+
+    while (total_remaining_cnt > 0 && iteration_count < MAX_ITERATIONS)
     {
+        iteration_count++;
         long long best_cost = std::numeric_limits<long long>::max();
         int best_user_idx = -1;
         int best_npu_idx = -1;
@@ -204,6 +214,12 @@ int main() // 主函数
             {
                 current_time = std::min(current_time, users[i].next_send_time);
             }
+        }
+
+        // 如果没有找到有效的当前时间，退出循环
+        if (current_time == std::numeric_limits<long long>::max())
+        {
+            break;
         }
 
         // 更新用户的紧急度
@@ -235,14 +251,14 @@ int main() // 主函数
             {
                 int server_idx = npus[npu_idx].server_id - 1;
                 // 计算最优批处理大小
-                int optimal_B = calculate_optimal_batch(servers[server_idx], users[idx].remaining_cnt,idx);
+                int optimal_B = calculate_optimal_batch(servers[server_idx], users[idx].remaining_cnt,idx+1);
                 if (optimal_B <= 0)
                     continue;
 
                 // 评估该调度的成本
                 long long arrival_time = send_time + latencies[server_idx][idx];
                 long long start_time = std::max(arrival_time, npus[npu_idx].free_at);
-                long long inference_time = static_cast<long long>(std::ceil(std::sqrt(optimal_B) / servers[server_idx].k));
+                long long inference_time = static_cast<long long>(std::ceil((double)optimal_B / (servers[server_idx].k * std::sqrt(optimal_B))));
                 long long finish_time = start_time + inference_time;
 
                 // 成本函数：完成时间 + 紧急度权重 + 迁移惩罚
@@ -310,25 +326,29 @@ int main() // 主函数
         }
         else
         {
-            // 如果所有用户当前时间点都无法调度，找到最早的下一个可能调度时间
-            long long next_time = std::numeric_limits<long long>::max();
+            // 强制推进时间，防止无限循环
+            long long min_next_time = std::numeric_limits<long long>::max();
             for (int i = 0; i < M; ++i)
             {
-                if (users[i].remaining_cnt > 0)
+                if (users[i].remaining_cnt > 0 && users[i].next_send_time > current_time)
                 {
-                    next_time = std::min(next_time, users[i].next_send_time);
+                    min_next_time = std::min(min_next_time, users[i].next_send_time);
                 }
             }
 
-            for (size_t j = 0; j < npus.size(); ++j)
-            {
-                next_time = std::min(next_time, npus[j].free_at);
-            }
-
-            // 如果没有找到下一个时间点，说明出现了问题，退出循环
-            if (next_time == std::numeric_limits<long long>::max())
+            // 如果没有用户可以在将来发送请求，退出循环
+            if (min_next_time == std::numeric_limits<long long>::max())
             {
                 break;
+            }
+
+            // 将所有用户的下次发送时间推进到最小的下次发送时间
+            for (int i = 0; i < M; ++i)
+            {
+                if (users[i].remaining_cnt > 0 && users[i].next_send_time <= current_time)
+                {
+                    users[i].next_send_time = min_next_time;
+                }
             }
         }
     }
@@ -347,6 +367,8 @@ int main() // 主函数
         }
         std::cout << "\n";
     }
+
+    std::cout.flush(); // 强制清空输出缓存
 
     return 0;
 }
