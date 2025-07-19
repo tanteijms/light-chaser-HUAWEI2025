@@ -30,6 +30,8 @@ struct User
     int last_server_id;        // 上一个请求发送的服务器id
     int last_npu_id_in_server; // 上一个请求发送的NPU id
     double urgency;            // 紧急程度 = remaining_cnt / (e - current_time)
+    // ver2.0
+    int a, b; // 对每个用户显存和batch size的关系
 };
 
 struct Npu
@@ -54,7 +56,7 @@ int N, M;
 std::vector<Server> servers;
 std::vector<User> users;
 std::vector<std::vector<int>> latencies; // latencies[server_idx][user_idx]
-int a, b;
+// int a, b;
 std::vector<Npu> npus;
 const int MIGRATION_PENALTY = 20; // 20是经验最佳值
 
@@ -134,18 +136,22 @@ void read_input() // 读取、解析输入
         }
     }
 
-    std::cin >> a >> b; // 读取显存和batchsize的关系
+    for (int i = 0; i < M; ++i)
+    {
+        std::cin >> users[i].a >> users[i].b; // 读取每个用户的显存和batch size
+    }
 
     // 预计算每个服务器的最大batch size
+    // todo: 待修改
     for (int i = 0; i < N; ++i)
     {
-        if (a == 0)
+        if (users[i].remaining_cnt == 0)
         {
-            servers[i].max_b = 1000;
+            // servers[i].max_b = 1000;
         }
         else
         {
-            servers[i].max_b = std::min(1000, (servers[i].m - b) / a); // 计算后直接存入Server结构体
+            // servers[i].max_b = std::min(1000, (servers[i].m - users[i].b) / users[i].a); // 计算后直接存入Server结构体
         }
     }
 
