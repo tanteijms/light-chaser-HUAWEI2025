@@ -55,3 +55,113 @@ graph_info.json
 # --- 生成文档（如 doxygen） ---
 docs/html/
 docs/latex/
+
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyd
+*.pyo
+*.bak
+*.tmp
+*.log
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+dist/
+develop-eggs/
+eggs/
+.eggs/
+sdist/
+var/
+parts/
+sdists/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+.pytest_cache/
+.coverage
+.tox/
+.nox/
+htmlcov/
+.hypothesis/
+
+# Virtual environment
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Editors
+.vscode/        # Visual Studio Code
+.idea/          # PyCharm / IntelliJ IDEA
+*.swp           # Vim swap files
+*.swo           # Vim swap files
+*~              # Emacs backup files
+.DS_Store       # macOS folder metadata
+Thumbs.db       # Windows thumbnail cache
+
+# OS-specific
+.Trash-*
+.Spotlight-V100
+.TemporaryItems
+.fseventsd
+
+# Sphinx documentation
+docs/_build/
+
+# Jupyter Notebook files
+.ipynb_checkpoints/
+
+# MyPy
+.mypy_cache/
+
+# Docker
+__pycache__/
+.dockerignore
+.dockerenv
+docker-compose.yml.backup # Backup files
+Dockerfile.backup
+.env_backup
+
+# Data files (often large or regenerated)
+*.csv
+*.tsv
+*.data
+*.sqlite
+*.db
+*.json
+*.parquet
+
+# Sensitive / Credentials
+.env
+.flaskenv
+*.key
+*.pem
+*.p12
+*.crt
+*.cert
+*.conf
+*.ini
+*.cfg
+secrets.py
+config.py
+local_settings.py
+
+# Miscellaneous
+*.zip
+*.tar.gz
+*.rar
